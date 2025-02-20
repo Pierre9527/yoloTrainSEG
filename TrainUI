@@ -1,0 +1,198 @@
+import tkinter as tk  #UI框架
+from tkinter import filedialog, messagebox  #選用可視化選擇檔案套件與警告窗套件
+import threading  #多線程管理,確保介面不因為訓練造成阻塞
+from ultralytics import YOLO  #YOLO套件, 版本>8.3.23
+import os  #檔案管理
+
+stages_config = {
+    "stage 1": {  
+        "optimizer": "Adam", #學習率優化器
+        "lr0": 0.0005, #這是初始訓練率, 目前導入CBAM後調整 0.00001>0.0005
+        "momentum": 0.9,
+        "weight_decay": 1e-4,
+        "epochs": 800,
+        "img_size": 640, #輸入圖片尺寸
+        "batch_size": 16, #批量, 受GPU影響
+        "name": "S1-640-32",
+        "mixed_precision": True, #混合精度訓練
+        "device": "0", #訓練設備, 這邊使用GPU訓練
+        "cos_lr": True,  #正弦收斂
+        "freeze": [0, 10],  #模型1-10層凍結
+        "auto_augment": "randaugment",  #使用默認套件做數據增強
+        "dropout": 0.1,
+        "patience": 10,
+    },
+    "stage 2": {  
+        "optimizer": "SGD",
+        "lr0": 0.001,
+        "momentum": 0.937,
+        "weight_decay": 5e-4,
+        "epochs": 400,
+        "img_size": 1024,
+        "batch_size": 4,  
+        "gradient_accumulation_steps": 4, 
+        "name": "S2-1024-4",
+        "mixed_precision": True,
+        "device": "0",
+        "cos_lr": True,
+        "degrees": 10,  
+        "translate": 0.1,  
+        "scale": 0.5,  
+        "fliplr": 0.5,  
+    },
+    "stage 3": {  
+        "optimizer": "SGD",
+        "lr0": 0.001,
+        "momentum": 0.8,
+        "weight_decay": 1e-3,
+        "epochs": 200,
+        "img_size": 1024,
+        "batch_size": 2,
+        "gradient_accumulation_steps": 8,  
+        "name": "S3-1024-2",
+        "mixed_precision": True,
+        "device": "0",
+        "auto_augment": "randaugment",
+        "erasing": 0.4,  
+        "mask_ratio": 2,  
+    },
+    "stage 4": {  
+        "optimizer": "AdamW",
+        "lr0": 0.0003,
+        "momentum": 0.95,
+        "weight_decay": 1e-5,
+        "epochs": 200,
+        "img_size": 1536,
+        "batch_size": 1,  
+        "gradient_accumulation_steps": 4,  
+        "name": "S4-1536-1",
+        "mixed_precision": True,
+        "device": "0",
+        "mask_ratio": 2,  
+        "dropout": 0.05,  
+    },
+}
+
+
+class YOLOTrainerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("YOLO")
+
+        # 默认值
+        self.data_yaml = tk.StringVar(value=r"")
+        self.model_yaml = tk.StringVar(value=r"")
+        self.pretrained_model = tk.StringVar(value="")  
+        self.selected_stage = tk.StringVar(value="stage 1")
+        self.project_name = tk.StringVar(value="default_project")  
+        self.run_name = tk.StringVar(value="default_run")  # W&B 
+        self.retrain = tk.BooleanVar(value=False)  
+        self.auto_train = tk.BooleanVar(value=False)  
+
+        # 界面设计
+        tk.Label(root, text="Data YAML:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Entry(root, textvariable=self.data_yaml, width=50).grid(row=0, column=1, padx=5, pady=5)
+        tk.Button(root, text="review", command=self.browse_data_yaml).grid(row=0, column=2, padx=5, pady=5)
+
+        tk.Label(root, text="Model YAML:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Entry(root, textvariable=self.model_yaml, width=50).grid(row=1, column=1, padx=5, pady=5)
+        tk.Button(root, text="review", command=self.browse_model_yaml).grid(row=1, column=2, padx=5, pady=5)
+
+        tk.Label(root, text="retrain:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Entry(root, textvariable=self.pretrained_model, width=50).grid(row=2, column=1, padx=5, pady=5)
+        tk.Button(root, text="review", command=self.browse_pretrained_model).grid(row=2, column=2, padx=5, pady=5)
+
+        tk.Checkbutton(root, text="retrain", variable=self.retrain).grid(row=3, column=0, columnspan=3, padx=5, pady=5)
+
+        tk.Label(root, text="stage:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=5)
+        stage_dropdown = tk.OptionMenu(root, self.selected_stage, *stages_config.keys())
+        stage_dropdown.grid(row=4, column=1, padx=5, pady=5)
+
+        tk.Label(root, text="W&B_name:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Entry(root, textvariable=self.project_name, width=50).grid(row=5, column=1, padx=5, pady=5)
+
+        tk.Label(root, text="W&B_run_name:").grid(row=6, column=0, sticky=tk.W, padx=5, pady=5)
+        tk.Entry(root, textvariable=self.run_name, width=50).grid(row=6, column=1, padx=5, pady=5)
+
+        self.start_button = tk.Button(root, text="start", command=self.start_training)
+        self.start_button.grid(row=7, column=0, columnspan=3, pady=10)
+
+        self.status_label = tk.Label(root, text="status: wait", fg="blue")
+        self.status_label.grid(row=8, column=0, columnspan=3, pady=10)
+
+    def browse_data_yaml(self):
+        path = filedialog.askopenfilename(filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")])
+        if path:
+            self.data_yaml.set(path)
+
+    def browse_model_yaml(self):
+        path = filedialog.askopenfilename(filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")])
+        if path:
+            self.model_yaml.set(path)
+
+    def browse_pretrained_model(self):
+        path = filedialog.askopenfilename(filetypes=[("YOLO weights", "*.pt"), ("All files", "*.*")])
+        if path:
+            self.pretrained_model.set(path)
+
+    def start_training(self):
+        self.start_button.config(state=tk.DISABLED)
+        self.status_label.config(text="status: traing...", fg="orange")
+        self.root.update()
+
+        #類管理-訓練與介面分開, 建立新線程
+        thread = threading.Thread(target=self.run_training)
+        thread.start()
+
+    def run_training(self):
+        try:
+            if not os.path.exists(self.data_yaml.get()):
+                raise FileNotFoundError(f"dataset not found: {self.data_yaml.get()}")
+            if not os.path.exists(self.model_yaml.get()):
+                raise FileNotFoundError(f"yaml not found: {self.model_yaml.get()}")
+            if self.retrain.get() and not os.path.exists(self.pretrained_model.get()):
+                raise FileNotFoundError(f"pretrain model not found: {self.pretrained_model.get()}")
+
+            model = YOLO(self.model_yaml.get(), task="segment") #任務設定分割
+
+            if self.retrain.get():
+                model = model.load(self.pretrained_model.get()) #再訓練模型讀取
+
+            stage_params = stages_config[self.selected_stage.get()] #讀取選擇的訓練階段
+
+            device = stage_params.get("device", "cuda:0") #cuda
+
+            #訓練變量清單
+            train_params = {
+                "data": self.data_yaml.get(),
+                "epochs": stage_params["epochs"],
+                "batch": stage_params["batch_size"],
+                "imgsz": stage_params["img_size"],
+                "optimizer": stage_params["optimizer"],
+                "lr0": stage_params["lr0"],
+                "momentum": stage_params["momentum"],
+                "weight_decay": stage_params["weight_decay"],
+                "amp": stage_params["mixed_precision"],
+                "project": self.project_name.get(),
+                "name": stage_params["name"],
+                "device": device,
+                "cos_lr": stage_params.get("cos_lr", False),
+                "freeze": stage_params.get("freeze", []),
+                "auto_augment": stage_params.get("auto_augment", None),
+
+            }
+
+
+            model.train(**train_params)
+            self.status_label.config(text="finsh", fg="green")
+
+        except Exception as e:
+            self.status_label.config(text="fail", fg="red")
+        finally:
+            self.start_button.config(state=tk.NORMAL)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = YOLOTrainerApp(root)
+    root.mainloop()
