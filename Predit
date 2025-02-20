@@ -1,9 +1,9 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from PIL import Image, ImageTk
-import torch
+from PIL import Image, ImageTk #簡單圖片顯示使用
+//import torch #視覺機器學習框架2.4.1+cu124 支持cuda12.4的版本, 後來把推理整合給YOLO
 import cv2
-import numpy as np
+//import numpy as np #
 from ultralytics import YOLO
 
 
