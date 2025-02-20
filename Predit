@@ -1,0 +1,204 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+import torch
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
+
+class YOLOv11DetectionInterface: #創建類的用意主要是方便初始化管理, 前期作業發現屬性較多, 後面整合起來成為一個新的類
+    def __init__(self, root):
+        self.root = root
+        self.root.title("YOLOv11 推理")
+        self.model = None
+        self.img_path = None
+        self.original_image = None
+        self.result_image = None
+        self.nms_threshold = tk.DoubleVar(value=0.5)  # 初始 NMS 閾值, NMS 將表示物件的置信度閾值
+        self.iou_threshold = tk.DoubleVar(value=0.5)  # 初始 IOU 閾值, IOU 是表示預測框與真實框的重疊程度, 目前我們模型建議是0.13, 這是按照正向分布得出來的平均結果
+
+        # 創建畫布
+        self.canvas = tk.Canvas(root, bg="gray")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        # 創建按鈕
+        self.load_model_btn = tk.Button(root, text="載入模型", command=self.load_model)
+        self.load_model_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+        self.load_image_btn = tk.Button(root, text="導入圖片", command=self.load_image)
+        self.load_image_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+        self.clear_btn = tk.Button(root, text="清空", command=self.clear_canvas)
+        self.clear_btn.pack(side=tk.LEFT, padx=10, pady=10)
+
+        # NMS 閾值調整滑動條
+        self.nms_slider = tk.Scale(
+            root, from_=0.1, to=1.0, resolution=0.01, orient=tk.HORIZONTAL,
+            label="NMS 閾值", variable=self.nms_threshold, command=self.update_nms_or_iou
+        )
+        self.nms_slider.pack(fill=tk.X, padx=10, pady=10)
+
+        # IOU 閾值調整滑動條
+        self.iou_slider = tk.Scale(
+            root, from_=0.1, to=1.0, resolution=0.01, orient=tk.HORIZONTAL,
+            label="IOU 閾值", variable=self.iou_threshold, command=self.update_nms_or_iou
+        )
+        self.iou_slider.pack(fill=tk.X, padx=10, pady=10)
+
+        # 添加顯示結果的 Textbox
+        self.result_textbox = tk.Text(root, height=4, width=50)
+        self.result_textbox.pack(fill=tk.X, padx=10, pady=10)
+        self.result_textbox.insert(tk.END, "平均寬度和間距將顯示在此處")
+
+        # 綁定窗口調整事件
+        self.root.bind("<Configure>", self.resize_image)
+
+    def load_model(self):
+        model_path = filedialog.askopenfilename(filetypes=[("YOLO 模型", "*.pt")])
+        if not model_path:
+            print("未選擇模型文件")
+            return None
+        try:
+            print(f"從以下路徑加載模型: {model_path}")
+            self.model = YOLO(model_path)  # 使用 YOLO 類加載模型
+            print("模型載入成功")
+            return self.model
+        except Exception as e:
+            print(f"模型加載失敗: {e}")
+            messagebox.showerror("錯誤", f"模型加載失敗: {e}")
+            return None
+
+    def load_image(self):
+        self.img_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg;*.png")])
+        if self.img_path:
+            try:
+                self.original_image = Image.open(self.img_path)
+                self.display_image(self.original_image)
+            except Exception as e:
+                messagebox.showerror("錯誤", f"圖片載入失敗: {e}")
+
+    def infer_and_calculate(self):
+        """執行推理並計算寬度和間距的平均值"""
+        if not self.model:
+            self.update_result_text("請先載入模型")
+            return
+        if not self.img_path:
+            self.update_result_text("請先導入圖片")
+            return
+        try:
+            print("開始推理並計算寬度和間距...")
+
+            # 設置 NMS 和 IOU 閾值
+            results = self.model(
+                self.img_path,
+                conf=self.nms_threshold.get(),
+                iou=self.iou_threshold.get()
+            )
+
+            # 讀取圖片, 試了一下, 傳統的CV比PIL讀取好用一點, 但缺點是CV需要從BGR轉RGB才能放到Tk的canvas上
+            image = cv2.imread(self.img_path)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # 儲存所有框的寬度和間距
+            widths = []
+            gaps = []
+
+            for result in results:
+                boxes = result.boxes
+                if boxes is not None:
+                    # 先將框根據 x1 排序，確保從左到右排列
+                    sorted_boxes = sorted(boxes, key=lambda box: box.xyxy[0][0].item())
+                    prev_x2 = None  # 儲存上一個框的 x2 座標
+
+                    for box in sorted_boxes:
+                        # 提取邊界框信息
+                        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                        # 強制轉成int, 不然會卡
+                        widths.append(x2 - x1)  # 計算寬度
+                        if prev_x2 is not None:
+                            # 僅在框之間有合理的順序時計算間距
+                            gap = x1 - prev_x2
+                            if gap > 0:  # 避免負值間距
+                                gaps.append(gap)
+                        prev_x2 = x2
+
+                        # 繪製框和標籤
+                        conf = box.conf[0].item()  # yolo的置信度方法
+                        cls = int(box.cls[0].item())  # 類別索引的方法
+                        label = f"{result.names[cls]} {conf:.2f}"
+                        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        #客製框有負擔, 這邊都用綠色來畫
+                        cv2.putText(
+                            image, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2
+                        )
+
+            //# 確保列表先設空
+            //avg_width = sum(widths) / len(widths) if widths else 0
+            //avg_gap = sum(gaps) / len(gaps) if gaps else 0
+            //# 這幾行加入可以循環使用
+
+            print(f"平均寬度: {avg_width:.2f}, 平均間距: {avg_gap:.2f}")
+
+            # 更新結果圖像
+            self.result_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+            self.display_image(Image.fromarray(image))
+
+            # 更新 Textbox 結果
+            self.update_result_text(f"框的平均寬度: {avg_width:.2f}\n框的平均間距: {avg_gap:.2f}")
+            print("推理和計算完成")
+        //except Exception as e:
+        //    print(f"推理或計算失敗: {e}")
+        //    self.update_result_text(f"推理或計算失敗: {e}")
+
+    def update_result_text(self, text):
+        """更新顯示結果的 Textbox"""
+        self.result_textbox.delete(1.0, tk.END)
+        self.result_textbox.insert(tk.END, text)
+
+    def update_nms_or_iou(self, event=None):
+        """更新 NMS 或 IOU 閾值並重新執行推理和計算"""
+        print(f"NMS 閾值更新為: {self.nms_threshold.get()}, IOU 閾值更新為: {self.iou_threshold.get()}")
+        self.infer_and_calculate()
+
+    def display_image(self, img):
+        # 縮放圖片以適應窗口保持比例
+        canvas_width = self.canvas.winfo_width()
+        canvas_height = self.canvas.winfo_height()
+        img_ratio = img.width / img.height
+        canvas_ratio = canvas_width / canvas_height
+
+        # 以防爆窗
+        if img_ratio > canvas_ratio:
+            new_width = canvas_width
+            new_height = int(canvas_width / img_ratio)
+        else:
+            new_height = canvas_height
+            new_width = int(canvas_height * img_ratio)
+
+        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS) #新版本導入了新的numpy, LANCZOS沒有爆錯
+        self.tk_image = ImageTk.PhotoImage(img)
+        self.canvas.create_image(
+            (canvas_width - new_width) // 2, (canvas_height - new_height) // 2,
+            anchor=tk.NW, image=self.tk_image
+        )
+
+    def resize_image(self, event):
+        if self.result_image is not None:
+            self.display_image(Image.fromarray(cv2.cvtColor(self.result_image, cv2.COLOR_BGR2RGB)))
+        elif self.original_image is not None:
+            self.display_image(self.original_image)
+
+    def clear_canvas(self):
+        self.canvas.delete("all")
+        self.original_image = None
+        self.result_image = None
+        self.img_path = None
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = YOLOv11DetectionInterface(root)
+    root.mainloop()
+
