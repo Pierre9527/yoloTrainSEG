@@ -6,4 +6,8 @@
 可以讓我上班時再加訓練模型, 回來又剛好訓練完, 而且不用暫停訓練造成數據蒐集困難
 後續透過CSBM優化特徵通道數量, 在Size_S模型上取得優異的改良成績
 
+# 4-step-train
 ![image](https://github.com/user-attachments/assets/9e3bb274-0478-442a-a490-5bfca737c8b5)
+
+# CSBM modudle
+![image](https://github.com/user-attachments/assets/acb8e423-ab48-4535-bb8d-ef9fb294173d)
